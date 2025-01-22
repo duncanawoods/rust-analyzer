@@ -938,9 +938,20 @@ impl GlobalState {
                     TestState::Ok => lsp_ext::TestState::Passed,
                     TestState::Failed { stdout } => lsp_ext::TestState::Failed { message: stdout },
                 };
-                let Some(test_id) = hack_recover_crate_name::lookup_name(name) else {
+
+                // if using cargo-nextest, the name field is prefixed with `<package>::<target>$`
+                let test_id = if let Some((target, name)) = name.split_once("$") {
+                    if let Some((_package, target)) = target.split_once("::") {
+                        format!("{target}::{name}")
+                    } else {
+                        format!("{target}::{name}")
+                    }
+                } else if let Some(test_id) = hack_recover_crate_name::lookup_name(name) {
+                    test_id
+                } else {
                     return;
                 };
+
                 self.send_notification::<lsp_ext::ChangeTestState>(
                     lsp_ext::ChangeTestStateParams { test_id, state },
                 );

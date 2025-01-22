@@ -3,6 +3,7 @@
 
 use crossbeam_channel::Sender;
 use paths::AbsPath;
+use project_model::TargetKind;
 use serde::Deserialize as _;
 use serde_derive::Deserialize;
 use toolchain::Tool;
@@ -69,11 +70,17 @@ pub(crate) struct CargoTestHandle {
 #[derive(Debug)]
 pub(crate) enum TestTarget {
     Workspace,
-    Package(String),
+    Package { package: String, target: String, kind: TargetKind },
+}
+
+pub(crate) enum TestToolKind {
+    CargoTest,
+    CargoNextest,
 }
 
 impl CargoTestHandle {
     pub(crate) fn new(
+        test_tool: TestToolKind,
         path: Option<&str>,
         options: CargoOptions,
         root: &AbsPath,
@@ -82,33 +89,73 @@ impl CargoTestHandle {
     ) -> std::io::Result<Self> {
         let mut cmd = toolchain::command(Tool::Cargo.path(), root);
         cmd.env("RUSTC_BOOTSTRAP", "1");
-        cmd.arg("test");
 
-        match &test_target {
-            TestTarget::Package(package) => {
-                cmd.arg("--package");
-                cmd.arg(package);
+        match test_tool {
+            TestToolKind::CargoTest => {
+                cmd.arg("test");
+
+                match &test_target {
+                    TestTarget::Package { package, target, kind } => {
+                        cmd.arg("--package");
+                        cmd.arg(package);
+                        match kind {
+                            TargetKind::Lib { .. } => {
+                                cmd.arg("--lib");
+                                // no name required because there can only be one lib target
+                            }
+                            TargetKind::Other => {
+                                // unsupported by cargo
+                            }
+                            _ => {
+                                cmd.arg(format!("--{kind}"));
+                                cmd.arg(target);
+                            }
+                        }
+                    }
+                    TestTarget::Workspace => {
+                        cmd.arg("--workspace");
+                    }
+                }
             }
-            TestTarget::Workspace => {
-                cmd.arg("--workspace");
+            TestToolKind::CargoNextest => {
+                cmd.env("NEXTEST_EXPERIMENTAL_LIBTEST_JSON", "1");
+                cmd.arg("nextest");
+                cmd.arg("run");
+                if let Some(dsl) = path {
+                    cmd.arg("-E");
+                    cmd.arg(dsl);
+                }
             }
-        };
+        }
 
         // --no-fail-fast is needed to ensure that all requested tests will run
         cmd.arg("--no-fail-fast");
         cmd.arg("--manifest-path");
         cmd.arg(root.join("Cargo.toml"));
         options.apply_on_command(&mut cmd);
-        cmd.arg("--");
-        if let Some(path) = path {
-            cmd.arg(path);
-        }
-        cmd.args(["-Z", "unstable-options"]);
-        cmd.arg("--format=json");
 
-        for extra_arg in options.extra_test_bin_args {
-            cmd.arg(extra_arg);
+        match test_tool {
+            TestToolKind::CargoTest => {
+                cmd.arg("--");
+                if let Some(path) = path {
+                    cmd.arg(path);
+                }
+                cmd.args(["-Z", "unstable-options"]);
+                cmd.arg("--format=json");
+
+                for extra_arg in options.extra_test_bin_args {
+                    cmd.arg(extra_arg);
+                }
+            }
+            TestToolKind::CargoNextest => {
+                cmd.arg("--message-format");
+                cmd.arg("libtest-json");
+                cmd.arg("--");
+            }
         }
+
+        // TODO: quick logging to remove
+        tracing::error!("\nTest command:\n{cmd:?}\n");
 
         Ok(Self { _handle: CommandHandle::spawn(cmd, sender)? })
     }
